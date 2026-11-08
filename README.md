@@ -109,8 +109,8 @@ Lab solutions and writeups will be added progressively as I work through the Web
 | Cross-Site Scripting           | In Progress |
 | Authentication                 | In Progress |
 | Access Control                 | In Progress |
-| Server-Side Request Forgery    | In Progress |
-| XML External Entity Injection  | In Progress |
+| Server-Side Request Forgery    | Completed   |
+| XML External Entity Injection  | Completed   |
 | Other Vulnerability Categories | Upcoming    |
 
 *Progress statuses will be updated as the repository grows.*
